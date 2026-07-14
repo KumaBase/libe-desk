@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Libe Desk">
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="#384860"/>
+  <rect x="36" y="32" width="16" height="64" rx="4" fill="#e59500"/>
+  <rect x="36" y="80" width="52" height="16" rx="4" fill="#e59500"/>
+  <rect x="36" y="100" width="56" height="4" rx="2" fill="#ffffff" opacity="0.22"/>
+</svg>
