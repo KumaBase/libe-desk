@@ -1,0 +1,218 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "20"
+  RUST_VERSION: "1.97.0"
+
+jobs:
+  verify:
+    name: Verify release source
+    uses: ./.github/workflows/ci.yml
+
+  prepare:
+    name: Validate release version
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Validate tag and version files
+        id: meta
+        shell: bash
+        run: |
+          TAURI_VERSION=$(node -e "const fs=require('fs'); console.log(JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json','utf8')).version)")
+          PACKAGE_VERSION=$(node -e "const fs=require('fs'); console.log(JSON.parse(fs.readFileSync('package.json','utf8')).version)")
+          CARGO_VERSION=$(awk -F '"' '/^version = "/ { print $2; exit }' src-tauri/Cargo.toml)
+          EXPECTED_TAG="v${TAURI_VERSION}"
+
+          if [[ "$TAURI_VERSION" != "$PACKAGE_VERSION" || "$TAURI_VERSION" != "$CARGO_VERSION" ]]; then
+            echo "Version mismatch: tauri=$TAURI_VERSION package=$PACKAGE_VERSION cargo=$CARGO_VERSION" >&2
+            exit 1
+          fi
+
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_name }}" != "$EXPECTED_TAG" ]]; then
+            echo "Tag ${{ github.ref_name }} must match application version $EXPECTED_TAG" >&2
+            exit 1
+          fi
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.ref }}" != "refs/heads/main" ]]; then
+            echo "Manual releases must be run from main." >&2
+            exit 1
+          fi
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            EXISTING_TAG_SHA=$(git rev-parse -q --verify "refs/tags/$EXPECTED_TAG^{commit}" || true)
+            if [[ -n "$EXISTING_TAG_SHA" && "$EXISTING_TAG_SHA" != "${{ github.sha }}" ]]; then
+              echo "Tag $EXPECTED_TAG already points to a different commit; refusing to move it." >&2
+              exit 1
+            fi
+          fi
+
+          echo "version=$TAURI_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$EXPECTED_TAG" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.artifact }}
+    needs: [verify, prepare]
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-14
+            artifact: macos
+            args: "--target universal-apple-darwin"
+          - platform: ubuntu-22.04
+            artifact: linux
+            args: ""
+          - platform: windows-2022
+            artifact: windows
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.platform == 'macos-14' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            libssl-dev \
+            libgtk-3-dev
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # Code-signing and notarization environment variables belong on this
+      # step once certificates are provisioned in a protected environment.
+      - name: Build unsigned application packages
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # action-v0.6.2
+        with:
+          args: ${{ matrix.args }}
+
+      - name: Store release packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          path: |
+            src-tauri/target/**/release/bundle/**/*.dmg
+            src-tauri/target/**/release/bundle/**/*.msi
+            src-tauri/target/**/release/bundle/**/*.exe
+            src-tauri/target/**/release/bundle/**/*.AppImage
+            src-tauri/target/**/release/bundle/**/*.deb
+            src-tauri/target/**/release/bundle/**/*.rpm
+            src-tauri/target/**/release/bundle/**/*.zip
+            src-tauri/target/**/release/bundle/**/*.tar.gz
+            src-tauri/target/**/release/bundle/**/*.sig
+
+  publish:
+    name: Assemble draft release
+    needs: [prepare, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download all platform packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-*
+          path: release-artifacts
+
+      - name: Create checksums and draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TARGET: ${{ github.sha }}
+        shell: bash
+        run: |
+          FILE_COUNT=$(find release-artifacts -type f | wc -l | tr -d ' ')
+          if [[ "$FILE_COUNT" == "0" ]]; then
+            echo "No release packages were downloaded." >&2
+            exit 1
+          fi
+
+          DUPLICATES=$(find release-artifacts -type f -printf '%f\n' | sort | uniq -d)
+          if [[ -n "$DUPLICATES" ]]; then
+            echo "Duplicate release asset names:" >&2
+            echo "$DUPLICATES" >&2
+            exit 1
+          fi
+
+          mkdir release-assets
+          while IFS= read -r -d '' file; do
+            cp "$file" "release-assets/$(basename "$file")"
+          done < <(find release-artifacts -type f -print0 | sort -z)
+
+          (
+            cd release-assets
+            find . -maxdepth 1 -type f -print0 \
+              | sort -z \
+              | xargs -0 sha256sum
+          ) > release-assets/SHA256SUMS
+
+          if gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' > release-is-draft.txt 2>/dev/null; then
+            if [[ "$(<release-is-draft.txt)" != "true" ]]; then
+              echo "Release $RELEASE_TAG is already published; refusing to replace it." >&2
+              exit 1
+            fi
+            while IFS= read -r asset; do
+              [[ -n "$asset" ]] && gh release delete-asset "$RELEASE_TAG" "$asset" --yes
+            done < <(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
+          else
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --target "$RELEASE_TARGET" \
+              --title "Libe Desk v${RELEASE_VERSION}" \
+              --notes "Automated multi-platform build. Review all assets and checksums before publishing. Packages are currently unsigned."
+          fi
+
+          while IFS= read -r -d '' file; do
+            gh release upload "$RELEASE_TAG" "$file"
+          done < <(find release-assets -type f -print0 | sort -z)

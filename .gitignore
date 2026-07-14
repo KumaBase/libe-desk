@@ -1,0 +1,16 @@
+node_modules
+dist
+.DS_Store
+.qa-*.png
+*.log
+.claude/
+dist-local
+
+# Local configuration and signing credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
