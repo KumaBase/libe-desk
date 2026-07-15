@@ -128,7 +128,7 @@ jobs:
       # Code-signing and notarization environment variables belong on this
       # step once certificates are provisioned in a protected environment.
       - name: Build unsigned application packages
-        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # action-v0.6.2
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         with:
           args: ${{ matrix.args }}
 
