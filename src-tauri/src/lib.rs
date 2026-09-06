@@ -1,7 +1,8 @@
 mod tab_manager;
+mod window_state;
 
 use tab_manager::TabManager;
-use tauri::{Manager, WindowEvent};
+use tauri::{Manager, RunEvent, WindowEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -10,6 +11,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(TabManager::default())
         .setup(|app| {
+            window_state::create_main(app)?;
             // 初期メニュー（タブ一覧は空）。タブ開閉のたびに rebuild する。
             tab_manager::rebuild_app_menu(app.handle(), &[])?;
 
@@ -64,6 +66,7 @@ pub fn run() {
             tab_manager::open_service,
             tab_manager::list_tabs,
             tab_manager::switch_tab,
+            tab_manager::move_tab,
             tab_manager::close_tab,
             tab_manager::go_back,
             tab_manager::go_forward,
@@ -71,6 +74,10 @@ pub fn run() {
             tab_manager::get_current_page,
             tab_manager::apply_chrome_layout,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building Tauri application")
+        .run(|app, event| match event {
+            RunEvent::ExitRequested { .. } | RunEvent::Exit => window_state::save_on_exit(app),
+            _ => {}
+        });
 }

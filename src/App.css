@@ -4,15 +4,15 @@
   --color-accent: #e59500;
   --color-accent-hover: #cf8600;
   --color-bg: #f4f5f7;
-  --color-border: #c7c7c7;
-  --color-titlebar: #dee1e6;
+  --color-border: #d6dce5;
+  --color-titlebar: #eef1f6;
   --color-tab-inactive: transparent;
   --color-tab-active: #fff;
   --radius: 8px;
   --sidebar-width: 220px;
-  /* Chrome 風の薄いタブ帯 */
-  --titlebar-height: 38px;
-  --traffic-lights-inset: 84px;
+  /* 合計を Rust の TITLEBAR_HEIGHT と揃える。 */
+  --window-drag-height: 36px;
+  --titlebar-height: 48px;
   color-scheme: light;
 }
 
@@ -39,16 +39,46 @@ body,
   background: var(--color-titlebar);
 }
 
+.window-dragbar {
+  height: var(--window-drag-height);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: #465670;
+  padding: 0 84px;
+}
+
+.window-dragbar span { pointer-events: none; }
+
 .titlebar {
   height: var(--titlebar-height);
   min-height: var(--titlebar-height);
   flex-shrink: 0;
   display: flex;
   align-items: flex-end;
-  padding: 0 2px 0 var(--traffic-lights-inset);
+  padding: 0 10px 0 0;
   background: var(--color-titlebar);
   border-bottom: 1px solid var(--color-border);
   user-select: none;
+}
+
+.workspace-label {
+  width: var(--sidebar-width);
+  flex-shrink: 0;
+  align-self: center;
+  padding-left: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #596a83;
+}
+
+button:focus-visible {
+  outline: 2px solid #4b91ee;
+  outline-offset: -2px;
 }
 
 .app-body {
@@ -268,8 +298,8 @@ body,
 .tab-bar {
   display: flex;
   align-items: flex-end;
-  gap: 2px;
-  width: 100%;
+  gap: 8px;
+  flex: 1;
   height: 100%;
   min-width: 0;
   background: transparent;
@@ -281,27 +311,29 @@ body,
 .tab-list {
   display: flex;
   align-items: flex-end;
-  gap: 0;
+  gap: 6px;
   overflow-x: auto;
+  scrollbar-width: thin;
   flex: 1;
   height: 100%;
   min-width: 0;
-  padding-top: 6px;
+  padding: 6px 2px;
+  align-items: center;
 }
 
 .tab {
   display: flex;
   align-items: center;
   gap: 4px;
-  max-width: 200px;
-  min-width: 72px;
-  height: 32px;
-  margin: 0 0 -1px;
-  padding: 0 6px 0 10px;
+  flex: 0 0 190px;
+  max-width: 220px;
+  min-width: 120px;
+  height: 34px;
+  margin: 0;
+  padding: 0 5px 0 0;
   background: var(--color-tab-inactive);
   border: 1px solid transparent;
-  border-bottom: none;
-  border-radius: 8px 8px 0 0;
+  border-radius: 7px;
   cursor: pointer;
   color: #3c4043;
   font-size: 12px;
@@ -318,12 +350,28 @@ body,
   color: #202124;
   font-weight: 500;
   border-color: var(--color-border);
-  border-bottom: 1px solid var(--color-tab-active);
+  box-shadow: 0 1px 3px rgba(32, 47, 69, 0.08);
   z-index: 1;
 }
 
 .tab-active:hover {
   background: var(--color-tab-active);
+}
+
+.tab-select {
+  min-width: 0;
+  flex: 1;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 8px 0 12px;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
 }
 
 .tab-title {
@@ -341,8 +389,8 @@ body,
   line-height: 1;
   cursor: pointer;
   border-radius: 50%;
-  width: 16px;
-  height: 16px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   flex-shrink: 0;
   opacity: 0.7;
@@ -360,7 +408,8 @@ body,
   font-size: 16px;
   width: 28px;
   height: 28px;
-  margin-bottom: 2px;
+  align-self: center;
+  margin-bottom: 0;
   border-radius: 50%;
   cursor: pointer;
   flex-shrink: 0;
@@ -378,3 +427,27 @@ body,
   background: transparent;
   pointer-events: none;
 }
+
+@media (max-width: 860px) {
+  .tab { flex-basis: 160px; }
+}
+
+/* タブの並べ替え位置。ページの WebView にドラッグを渡さない。 */
+.tab-select { touch-action: none; cursor: grab; }
+.tab-dragging { opacity: 0.5; }
+.tab-dragging .tab-select { cursor: grabbing; }
+.tab-drop-before::before,
+.tab-drop-after::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 2px;
+  background: #397bd6;
+  pointer-events: none;
+}
+.tab-drop-before::before { left: -4px; }
+.tab-drop-after::after { right: -4px; }
+.tab-reorder-error:empty { display: none; }
+.tab-reorder-error { font-size: 11px; color: #a32c2c; align-self: center; max-width: 180px; }

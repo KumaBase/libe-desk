@@ -31,7 +31,7 @@ const SERVICES: &[(&str, &str, &str, &str, bool)] = &[
     ),
     (
         "chat",
-        "チャット",
+        "参加チャット",
         "https://libecity.com/room_list",
         "本体",
         false,
@@ -45,7 +45,7 @@ const SERVICES: &[(&str, &str, &str, &str, bool)] = &[
     ),
     (
         "events",
-        "イベント",
+        "イベント・オフ会カレンダー",
         "https://libecity.com/mypage/event_calendar",
         "本体",
         false,
@@ -92,18 +92,46 @@ const SERVICES: &[(&str, &str, &str, &str, bool)] = &[
         "本体",
         false,
     ),
+    (
+        "bookmarks",
+        "ブックマーク",
+        "https://libecity.com/bookmark",
+        "本体",
+        false,
+    ),
+    (
+        "lifeplan",
+        "支出管理・ライフプラン",
+        "https://lifeplan.libecity.com/",
+        "本体",
+        false,
+    ),
     // --- 学ぶ ---
     (
         "library",
-        "ノウハウ図書館",
+        "リベシティノウハウ図書館",
         "https://library.libecity.com/",
         "学ぶ",
         false,
     ),
     (
         "school-list",
-        "オンラインスクール一覧",
-        "https://site.libecity.com/content/school-list",
+        "リベシティオンラインスクール",
+        "https://site.libecity.com/school-list",
+        "学ぶ",
+        false,
+    ),
+    (
+        "seminars",
+        "リベシティセミナー",
+        "https://site.libecity.com/seminar-category/seminar-list",
+        "学ぶ",
+        false,
+    ),
+    (
+        "camps",
+        "リベシティ合宿",
+        "https://site.libecity.com/camp-category/camp-list",
         "学ぶ",
         false,
     ),
@@ -117,73 +145,91 @@ const SERVICES: &[(&str, &str, &str, &str, bool)] = &[
     ),
     (
         "ovice",
-        "オンラインスペース",
+        "リベシティオンラインスペース（ovice）",
         "https://libecity.com/room_list?room_id=VirtualOffice",
         "交流する",
         false,
     ),
     (
         "map",
-        "マップ",
-        "https://map.libecity.com/",
+        "リベシティマップ",
+        "https://map.libecity.com/login",
         "交流する",
         false,
     ),
     // --- 仕事・副業・売買 ---
     (
         "works",
-        "ワークス",
+        "リベシティワークス",
         "https://works.libecity.com/",
         "仕事・副業・売買",
         false,
     ),
     (
         "skill",
-        "スキルマーケット",
+        "リベシティスキルマーケットOnline",
         "https://skill.libecity.com/",
         "仕事・副業・売買",
         false,
     ),
     (
         "meets",
-        "スキルマーケット Meets",
+        "リベシティスキルマーケットMeets",
         "https://meets.libecity.com/",
         "仕事・副業・売買",
         false,
     ),
     (
         "ichiba",
-        "市場",
+        "リベシティ市場",
         "https://ichiba.libecity.com/",
         "仕事・副業・売買",
         false,
     ),
     (
         "furima",
-        "フリーマーケット",
+        "リベシティフリーマーケット",
         "https://furima.libecity.com/",
         "仕事・副業・売買",
         false,
     ),
     (
         "space",
-        "スペースシェア",
+        "リベシティスペースシェアマーケット",
         "https://space.libecity.com/",
         "仕事・副業・売買",
         false,
     ),
     (
         "job",
-        "ジョブサーチ",
+        "リベシティジョブサーチ",
         "https://job.libecity.com/",
         "仕事・副業・売買",
         false,
     ),
     (
         "virtual-office",
-        "バーチャルオフィス",
-        "https://virtualoffice.libecity.com/",
+        "リベシティバーチャルオフィス",
+        "https://virtualoffice.libecity.com/mypage",
         "仕事・副業・売買",
+        false,
+    ),
+];
+
+// 外部サービスは内部WebViewのホスト許可リストに含めない。
+const EXTERNAL_SERVICES: &[(&str, &str, &str, &str, bool)] = &[
+    (
+        "president-live",
+        "学長ライブ",
+        "https://www.youtube.com/playlist?list=PLpwLNivKud-h2NB97yKyezve0d0-0Lb2r",
+        "学ぶ",
+        false,
+    ),
+    (
+        "city-live",
+        "リベシティ限定ライブ",
+        "https://www.youtube.com/playlist?list=PLpwLNivKud-ig9iaBUC8ZF4qa115h4sw1",
+        "学ぶ",
         false,
     ),
 ];
@@ -272,6 +318,7 @@ pub struct ServiceInfo {
     pub url: String,
     pub category: String,
     pub pinned: bool,
+    pub external: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -320,6 +367,41 @@ fn snapshot(state: &TabManagerState) -> Vec<TabInfo> {
         .collect()
 }
 
+/// Reorders the tab metadata without changing the active tab or any webviews.
+/// Returns whether the tab order changed.
+fn move_tab_inner(
+    state: &mut TabManagerState,
+    tab_id: &str,
+    before_tab_id: Option<&str>,
+) -> Result<bool, String> {
+    let Some(source_index) = state.tabs.iter().position(|tab| tab.id == tab_id) else {
+        return Err("tab not found".to_string());
+    };
+
+    if let Some(before_tab_id) = before_tab_id {
+        if !state.tabs.iter().any(|tab| tab.id == before_tab_id) {
+            return Err("before tab not found".to_string());
+        }
+        if before_tab_id == tab_id {
+            return Ok(false);
+        }
+    }
+
+    let tab = state.tabs.remove(source_index);
+    let destination_index = match before_tab_id {
+        Some(before_tab_id) => state
+            .tabs
+            .iter()
+            .position(|candidate| candidate.id == before_tab_id)
+            // The target was verified above and differs from the moved tab.
+            .expect("validated before tab must remain after source removal"),
+        None => state.tabs.len(),
+    };
+    state.tabs.insert(destination_index, tab);
+
+    Ok(source_index != destination_index)
+}
+
 fn emit_tabs_changed<R: Runtime>(app: &AppHandle<R>, state: &TabManagerState) {
     let tabs = snapshot(state);
     let _ = app.emit("tabs-changed", &tabs);
@@ -330,9 +412,9 @@ fn emit_tabs_changed<R: Runtime>(app: &AppHandle<R>, state: &TabManagerState) {
 }
 
 fn update_window_title<R: Runtime>(app: &AppHandle<R>, _state: &TabManagerState) {
-    // Overlay + hiddenTitle でもタイトル文字列が残ることがあるので空にする
+    // ウィンドウ一覧やOSの表示用タイトル。
     if let Some(window) = app.get_window("main") {
-        let _ = window.set_title("");
+        let _ = window.set_title("Libe Desk");
     }
 }
 
@@ -416,10 +498,31 @@ pub fn rebuild_app_menu<R: Runtime>(app: &AppHandle<R>, tabs: &[TabInfo]) -> Res
         .build()
         .map_err(|e| e.to_string())?;
 
+    // macOSでは最初のサブメニューがアプリメニューになる。
+    // 毎回の再構築でも標準の終了操作（Cmd+Q）を保持する。
+    let application = SubmenuBuilder::new(app, "Libe Desk");
+    #[cfg(target_os = "macos")]
+    let application = application
+        .hide_with_text("Libe Deskを隠す")
+        .hide_others_with_text("ほかを隠す")
+        .show_all_with_text("すべてを表示")
+        .separator();
+    let application = application
+        .quit_with_text("Libe Deskを終了")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let window_menu = SubmenuBuilder::new(app, "ウィンドウ")
+        .minimize_with_text("最小化")
+        .maximize_with_text("拡大／縮小")
+        .build()
+        .map_err(|e| e.to_string())?;
+
     let menu = MenuBuilder::new(app)
+        .item(&application)
         .item(&tabs_menu)
         .item(&navigate)
         .item(&edit)
+        .item(&window_menu)
         .build()
         .map_err(|e| e.to_string())?;
     app.set_menu(menu).map_err(|e| e.to_string())?;
@@ -456,8 +559,8 @@ fn apply_visibility<R: Runtime>(app: &AppHandle<R>, state: &TabManagerState) {
 }
 
 const SIDEBAR_WIDTH: f64 = 220.0;
-/// CSS の --titlebar-height と揃える（Overlay タイトルバー内タブ）
-const TITLEBAR_HEIGHT: f64 = 38.0;
+/// CSS の --window-drag-height + --titlebar-height と揃える。
+const TITLEBAR_HEIGHT: f64 = 84.0;
 
 #[cfg(debug_assertions)]
 fn layout_log(message: &str) {
@@ -712,12 +815,16 @@ fn open_url_internal_with_title<R: Runtime>(
 pub fn list_services() -> Vec<ServiceInfo> {
     let mut services: Vec<ServiceInfo> = SERVICES
         .iter()
+        .chain(EXTERNAL_SERVICES.iter())
         .map(|(id, name, url, category, pinned)| ServiceInfo {
             id: id.to_string(),
             name: name.to_string(),
             url: url.to_string(),
             category: category.to_string(),
             pinned: *pinned,
+            external: EXTERNAL_SERVICES
+                .iter()
+                .any(|(external_id, ..)| external_id == id),
         })
         .collect();
 
@@ -741,13 +848,19 @@ pub fn open_service<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, TabManager>,
     service_id: String,
-) -> Result<TabInfo, String> {
+) -> Result<Option<TabInfo>, String> {
+    if let Some((_, _, raw_url, _, _)) = EXTERNAL_SERVICES.iter().find(|(id, ..)| *id == service_id)
+    {
+        let url = Url::parse(raw_url).map_err(|e| e.to_string())?;
+        request_external_open(&app, &url, Arc::new(AtomicBool::new(false)));
+        return Ok(None);
+    }
     let (name, url) = SERVICES
         .iter()
         .find(|(id, _, _, _, _)| *id == service_id)
         .map(|(_, name, url, _, _)| (*name, *url))
         .ok_or("unknown service")?;
-    open_url_internal_with_title(&app, &state, url, Some(name))
+    open_url_internal_with_title(&app, &state, url, Some(name)).map(Some)
 }
 
 #[tauri::command]
@@ -771,6 +884,20 @@ pub fn switch_tab<R: Runtime>(
     smoke_log(&format!("switch_tab {tab_id}"));
     apply_visibility(&app, &guard);
     emit_tabs_changed(&app, &guard);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn move_tab<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, TabManager>,
+    tab_id: String,
+    before_tab_id: Option<String>,
+) -> Result<(), String> {
+    let mut guard = state.lock().unwrap();
+    if move_tab_inner(&mut guard, &tab_id, before_tab_id.as_deref())? {
+        emit_tabs_changed(&app, &guard);
+    }
     Ok(())
 }
 
@@ -885,6 +1012,82 @@ pub fn apply_chrome_layout<R: Runtime>(
 mod tests {
     use super::*;
 
+    fn tab_state(ids: &[&str], active_id: &str) -> TabManagerState {
+        TabManagerState {
+            tabs: ids
+                .iter()
+                .map(|id| TabMeta {
+                    id: (*id).to_string(),
+                    title: format!("title-{id}"),
+                    url: format!("https://example.com/{id}"),
+                })
+                .collect(),
+            active_id: Some(active_id.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn tab_ids(state: &TabManagerState) -> Vec<&str> {
+        state.tabs.iter().map(|tab| tab.id.as_str()).collect()
+    }
+
+    #[test]
+    fn move_tab_reorders_forward_without_changing_active_tab() {
+        let mut state = tab_state(&["a", "b", "c", "d"], "c");
+
+        assert_eq!(move_tab_inner(&mut state, "a", Some("d")), Ok(true));
+
+        assert_eq!(tab_ids(&state), ["b", "c", "a", "d"]);
+        assert_eq!(state.active_id.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn move_tab_reorders_backward() {
+        let mut state = tab_state(&["a", "b", "c", "d"], "d");
+
+        assert_eq!(move_tab_inner(&mut state, "d", Some("b")), Ok(true));
+
+        assert_eq!(tab_ids(&state), ["a", "d", "b", "c"]);
+        assert_eq!(state.active_id.as_deref(), Some("d"));
+    }
+
+    #[test]
+    fn move_tab_moves_to_end() {
+        let mut state = tab_state(&["a", "b", "c"], "b");
+
+        assert_eq!(move_tab_inner(&mut state, "a", None), Ok(true));
+
+        assert_eq!(tab_ids(&state), ["b", "c", "a"]);
+        assert_eq!(state.active_id.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn move_tab_rejects_unknown_ids_without_mutating_state() {
+        let mut state = tab_state(&["a", "b", "c"], "b");
+
+        assert_eq!(
+            move_tab_inner(&mut state, "missing", Some("b")),
+            Err("tab not found".into())
+        );
+        assert_eq!(
+            move_tab_inner(&mut state, "a", Some("missing")),
+            Err("before tab not found".into())
+        );
+
+        assert_eq!(tab_ids(&state), ["a", "b", "c"]);
+        assert_eq!(state.active_id.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn move_tab_to_itself_is_a_noop() {
+        let mut state = tab_state(&["a", "b", "c"], "b");
+
+        assert_eq!(move_tab_inner(&mut state, "b", Some("b")), Ok(false));
+
+        assert_eq!(tab_ids(&state), ["a", "b", "c"]);
+        assert_eq!(state.active_id.as_deref(), Some("b"));
+    }
+
     #[test]
     fn allowed_internal_urls_require_exact_https_service_hosts() {
         assert!(is_allowed_internal_url(
@@ -942,6 +1145,34 @@ mod tests {
             Url::parse("https://user:secret@libecity.com/path?token=secret#fragment").unwrap();
         let logged = redact_url_for_log(&url);
         assert_eq!(logged, "https://libecity.com/path");
+    }
+
+    #[test]
+    fn external_services_do_not_expand_internal_webview_permissions() {
+        for (_, _, raw_url, _, _) in EXTERNAL_SERVICES {
+            let url = Url::parse(raw_url).unwrap();
+            assert!(is_allowed_external_url(&url));
+            assert!(!is_allowed_internal_url(&url));
+        }
+        assert!(is_allowed_internal_url(
+            &Url::parse("https://lifeplan.libecity.com/").unwrap()
+        ));
+        assert!(!is_allowed_internal_url(
+            &Url::parse("https://lifeplan.libecity.com.evil.example/").unwrap()
+        ));
+    }
+
+    #[test]
+    fn service_ids_remain_unique_across_internal_and_external_menus() {
+        let services = list_services();
+        let mut ids: Vec<_> = services.iter().map(|service| &service.id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), services.len());
+        assert_eq!(
+            services.iter().filter(|service| service.external).count(),
+            2
+        );
     }
 
     #[test]

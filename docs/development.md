@@ -6,7 +6,7 @@
 - Rust（stable）
 - Tauri の[各 OS 向け前提パッケージ](https://tauri.app/start/prerequisites/)
 
-現時点で環境変数や外部 API キーは必要ありません。
+通常の開発では環境変数や外部 API キーは必要ありません。macOS の署名・公証には以下の設定が必要です。
 
 ## セットアップ
 
@@ -59,6 +59,67 @@ npm run dist:local
 
 （`dist-local/` は `.gitignore` 対象です）
 
+## macOS の署名・公証
+
+Kuma Base LLC の `Developer ID Application` 証明書と対応する秘密鍵がキーチェーンにある Mac では、次のコマンドで署名付きアプリを作成できます。
+
+```bash
+npm run build:mac:signed
+```
+
+専用設定 `src-tauri/tauri.signed.conf.json` で署名者と Hardened Runtime を指定します。通常のビルドと GitHub Actions は従来の設定を使います。秘密鍵はリポジトリに保存しません。
+
+生成先は `src-tauri/target/release/bundle/macos/Libe Desk.app` です。署名は次で確認します。
+
+```bash
+codesign --verify --deep --strict --verbose=2 "src-tauri/target/release/bundle/macos/Libe Desk.app"
+codesign -dv --verbose=4 "src-tauri/target/release/bundle/macos/Libe Desk.app"
+```
+
+**署名だけでは配布準備完了ではありません。** 公開前に Apple の公証とチケットの添付が必要です。Tauri の公証には Apple の認証設定が別途必要です。Apple Account の通常パスワードや秘密鍵をソース・ログ・チャットへ記載しないでください。
+
+設定方法は [Tauri の署名・公証ドキュメント](https://v2.tauri.app/distribute/sign/macos/) を参照してください。公証後は `xcrun stapler validate` と `spctl --assess --type execute` でも成果物を確認します。
+
+この Mac では公証用認証をキーチェーンプロファイル `libe-desk-notary` に保存しています。署名ビルド後、次の手順で公証できます（Apple にアプリ本体を送信します）。
+
+```bash
+ditto -c -k --keepParent "src-tauri/target/release/bundle/macos/Libe Desk.app" /private/tmp/libe-desk-notary.zip
+xcrun notarytool submit /private/tmp/libe-desk-notary.zip --keychain-profile libe-desk-notary --wait
+```
+
+結果が `Accepted` になったことを確認してからチケットを添付します。
+
+```bash
+xcrun stapler staple "src-tauri/target/release/bundle/macos/Libe Desk.app"
+xcrun stapler validate "src-tauri/target/release/bundle/macos/Libe Desk.app"
+codesign --verify --deep --strict --verbose=2 "src-tauri/target/release/bundle/macos/Libe Desk.app"
+spctl --assess --type execute --verbose=2 "src-tauri/target/release/bundle/macos/Libe Desk.app"
+```
+
+配布用 ZIP はチケット添付後の `.app` から改めて作成してください。再ビルドした場合は公証・添付・検証をやり直します。上記プロファイルはローカルキーチェーンの設定であり、他の Mac や GitHub Actions には引き継がれません。
+
+### ドラッグしてインストールする DMG
+
+公証チケット添付済みの Apple Silicon アプリから、案内背景と `/Applications` へのショートカットを含む DMG を作成できます。アプリを再ビルドせず、そのまま格納します。
+
+```bash
+python3 -m venv /private/tmp/libe-desk-dmg-venv
+/private/tmp/libe-desk-dmg-venv/bin/pip install dmgbuild==1.6.7 Pillow==12.3.0
+/private/tmp/libe-desk-dmg-venv/bin/python scripts/build-macos-dmg.py --output dist-local/Libe.Desk_0.1.1_macos_arm64.dmg
+```
+
+出力先が存在すると停止します。バージョンに合わせてファイル名を指定してください。スクリプトは DMG を署名しますが、公証は次の手順で別途行います。
+
+```bash
+xcrun notarytool submit dist-local/Libe.Desk_0.1.1_macos_arm64.dmg --keychain-profile libe-desk-notary --wait
+# Accepted を確認した後に実行
+xcrun stapler staple dist-local/Libe.Desk_0.1.1_macos_arm64.dmg
+xcrun stapler validate dist-local/Libe.Desk_0.1.1_macos_arm64.dmg
+codesign --verify --strict --verbose=2 dist-local/Libe.Desk_0.1.1_macos_arm64.dmg
+```
+
+DMG を開いて配置と Applications のリンク先を確認し、中のアプリにも署名・公証・Gatekeeper の検証を行ってください。最終 DMG のチェックサムを計算し、GitHub Releases の添付と `SHA256SUMS` を更新します。
+
 ## バージョン
 
 初回公開は **0.1.0** です。`0.x.y` の間は [Semantic Versioning](https://semver.org/lang/ja/) に従い、次のように上げます。
@@ -105,4 +166,4 @@ git tag v0.1.1
 git push origin v0.1.1
 ```
 
-コード署名は行いません。利用者向けの未署名アプリ起動手順はルートの [README.md](../README.md) に記載しています。
+GitHub Actions ではまだコード署名を行いません。ローカルの署名設定だけでは CI に証明書は渡りません。現在の署名・対応環境と、過去の未署名版向けの起動手順は [README.md](../README.md) を参照してください。

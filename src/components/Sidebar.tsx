@@ -55,8 +55,10 @@ function ServiceRow(props: {
 }) {
   return (
     <div class="sidebar-item-row">
-      <button class="sidebar-item" onClick={props.onOpen}>
+      <button class="sidebar-item" onClick={props.onOpen}
+        title={props.service.external ? `${props.service.name}（確認後にブラウザで開く）` : props.service.name}>
         {props.service.name}
+        <Show when={props.service.external}><span aria-hidden="true"> ↗</span></Show>
       </button>
       <button
         class="sidebar-pin"

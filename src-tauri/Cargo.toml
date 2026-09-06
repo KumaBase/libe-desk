@@ -1,6 +1,6 @@
 [package]
 name = "libe-desk"
-version = "0.1.0"
+version = "0.1.1"
 description = "Libe Desk - リベシティ非公式デスクトップアプリ"
 authors = ["KumaBase"]
 edition = "2021"

@@ -7,6 +7,7 @@ export interface ServiceInfo {
   url: string;
   category: string;
   pinned: boolean;
+  external: boolean;
 }
 
 export interface TabInfo {
@@ -24,8 +25,10 @@ export interface TabInfo {
 export const controller = {
   listServices: () => invoke<ServiceInfo[]>("list_services"),
   openService: (serviceId: string) =>
-    invoke<TabInfo>("open_service", { serviceId }),
+    invoke<TabInfo | null>("open_service", { serviceId }),
   listTabs: () => invoke<TabInfo[]>("list_tabs"),
+  moveTab: (tabId: string, beforeTabId: string | null) =>
+    invoke<void>("move_tab", { tabId, beforeTabId }),
   switchTab: (tabId: string) => invoke<void>("switch_tab", { tabId }),
   closeTab: (tabId: string) => invoke<void>("close_tab", { tabId }),
   goBack: (tabId: string) => invoke<void>("go_back", { tabId }),

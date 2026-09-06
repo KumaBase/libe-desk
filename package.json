@@ -1,6 +1,6 @@
 {
   "name": "libe-desk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Libe Desk - リベシティ非公式デスクトップアプリ",
   "type": "module",
   "repository": {
@@ -19,7 +19,8 @@
     "serve": "vite preview",
     "tauri": "tauri",
     "version:check": "node scripts/check-version.mjs",
-    "dist:local": "bash scripts/sync-dist-local.sh"
+    "dist:local": "bash scripts/sync-dist-local.sh",
+    "build:mac:signed": "tauri build --config src-tauri/tauri.signed.conf.json --bundles app"
   },
   "license": "MIT",
   "dependencies": {

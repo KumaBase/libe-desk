@@ -6,7 +6,7 @@ import { initTabsStore } from "./store/tabs";
 import "./App.css";
 
 /**
- * Overlay タイトルバー内（信号ボタン右）にタブ。
+ * 専用のウィンドウ移動領域の下に独立したタブ帯。
  * コンテンツ Webview はタイトルバー下 × サイドバー右。
  */
 function App() {
@@ -24,7 +24,11 @@ function App() {
 
   return (
     <div class="app-shell">
-      <header class="titlebar" data-tauri-drag-region>
+      <div class="window-dragbar" data-tauri-drag-region title="ドラッグで移動・ダブルクリックで拡大／元に戻す">
+        <span>Libe Desk</span>
+      </div>
+      <header class="titlebar">
+        <div class="workspace-label">開いているページ</div>
         <TabBar />
       </header>
       <div class="app-body">
