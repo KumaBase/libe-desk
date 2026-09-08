@@ -17,6 +17,13 @@ export interface TabInfo {
   active: boolean;
 }
 
+/** リベシティのプロフィールページへのローカルブックマーク */
+export interface FavoriteUser {
+  id: string;
+  name: string;
+  addedAt: number;
+}
+
 /**
  * UI(SolidJS)と実際のタブ・ページ操作を分離するための共通操作口。
  * ここに定義された関数だけを介してタブ・ページを操作することで、
@@ -39,4 +46,20 @@ export const controller = {
   applyChromeLayout: () => invoke<void>("apply_chrome_layout"),
   onTabsChanged: (cb: (tabs: TabInfo[]) => void): Promise<UnlistenFn> =>
     listen<TabInfo[]>("tabs-changed", (event) => cb(event.payload)),
+
+  listFavoriteUsers: () => invoke<FavoriteUser[]>("list_favorite_users"),
+  addFavoriteUser: (id: string, name: string) =>
+    invoke<FavoriteUser[]>("add_favorite_user", { id, name }),
+  removeFavoriteUser: (id: string) =>
+    invoke<FavoriteUser[]>("remove_favorite_user", { id }),
+  renameFavoriteUser: (id: string, name: string) =>
+    invoke<FavoriteUser[]>("rename_favorite_user", { id, name }),
+  moveFavoriteUser: (id: string, toIndex: number) =>
+    invoke<FavoriteUser[]>("move_favorite_user", { id, toIndex }),
+  openFavoriteUser: (id: string) =>
+    invoke<TabInfo>("open_favorite_user", { id }),
+  onFavoritesChanged: (
+    cb: (favorites: FavoriteUser[]) => void,
+  ): Promise<UnlistenFn> =>
+    listen<FavoriteUser[]>("favorites-changed", (event) => cb(event.payload)),
 };

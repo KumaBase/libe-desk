@@ -237,6 +237,10 @@ const EXTERNAL_SERVICES: &[(&str, &str, &str, &str, bool)] = &[
 /// サイドバー「すべてのサービス」のカテゴリ表示順
 const CATEGORY_ORDER: &[&str] = &["本体", "学ぶ", "交流する", "仕事・副業・売買"];
 
+/// リベシティのページへ注入する、お気に入りユーザーの★ボタン。
+/// スクリプト側で origin を検査してから動く。
+const FAVORITES_SCRIPT: &str = include_str!("inject/favorites.js");
+
 fn service_url(service_id: &str) -> Option<&'static str> {
     SERVICES
         .iter()
@@ -701,6 +705,7 @@ fn spawn_tab_webview<R: Runtime>(
     ));
 
     let builder = WebviewBuilder::new(tab_id.clone(), WebviewUrl::External(url))
+        .initialization_script(FAVORITES_SCRIPT)
         .on_navigation(move |nav_url| {
             if is_allowed_internal_url(nav_url) {
                 let state = nav_app.state::<TabManager>();
@@ -756,7 +761,7 @@ fn open_url_internal<R: Runtime>(
     open_url_internal_with_title(app, state, raw_url, None)
 }
 
-fn open_url_internal_with_title<R: Runtime>(
+pub(crate) fn open_url_internal_with_title<R: Runtime>(
     app: &AppHandle<R>,
     state: &tauri::State<'_, TabManager>,
     raw_url: &str,
