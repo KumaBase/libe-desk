@@ -8,9 +8,9 @@ Libe Desk は、リベシティ本体と関連サービスを 1 つのデスク�
 
 ## 対応環境
 
-- 0.1.1の配布対象：macOS Apple Silicon
+- 0.2.0の配布対象：macOS Apple Silicon
 - Intel Mac向けの配布物は現在提供しない
-- Windows・Linuxは過去のリリースで配布。0.1.1の更新・実機検証には含めない
+- Windows・Linuxは過去のリリースで配布。0.2.0の更新・実機検証には含めない
 
 アプリは Tauri 2、SolidJS、TypeScript、Vite、Rust で構成します。
 
@@ -65,7 +65,7 @@ Libe Desk は、リベシティ本体と関連サービスを 1 つのデスク�
 
 ## 配布
 
-0.1.1はローカルMacで署名・公証したApple Silicon版のDMGとZIPをGitHub Releasesへ公開します。GitHub Actionsの複数OSビルドは未署名の下書き生成用です。現在は自動更新機能を持たないため、利用者は新しい版を手動でインストールします。
+0.2.0はローカルMacで署名・公証したApple Silicon版のDMGとZIPをGitHub Releasesへ公開します。GitHub Actionsの複数OSビルドは未署名の下書き生成用です。現在は自動更新機能を持たないため、利用者は新しい版を手動でインストールします。
 
 ## スコープ外
 

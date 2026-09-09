@@ -67,6 +67,28 @@ Kuma Base LLC の `Developer ID Application` 証明書と対応する秘密鍵�
 npm run build:mac:signed
 ```
 
+### 実行できるのは GUI セッションだけ
+
+署名と公証は、その Mac の画面でログインしているセッション（`launchctl managername` が `Aqua`）からしか実行できません。SSH 接続やバックグラウンドのエージェントからは、キーチェーンが解錠済みでも `codesign` が `errSecInternalComponent` で失敗し、`notarytool` は公証プロファイルを `keychainLocked` として読めません。GUI ログインセッションに紐づくセキュリティセッションを持たないためで、別のターミナルで `security unlock-keychain` しても解消しません。
+
+そのため署名リリースは Mac mini 本体のターミナルから、次のスクリプトで通して実行します。署名ビルドから公証、チケット添付、DMG 作成、チェックサム生成までを行い、`dist-local/` へ配布物を出します。GitHub Releases への添付は行いません。
+
+```bash
+bash scripts/release-macos-signed.sh
+```
+
+スクリプトは冒頭でセッション種別、アーキテクチャ、証明書、公証プロファイルを検査して、条件を満たさなければ何もせず止まります。`--skip-checks` でリリース前チェック（`version:check`、`npm ci`、`typecheck`、`cargo fmt --check`、`cargo test`）を省略できます。
+
+DMG の作成以降でつまずいた場合は、`--dmg-only` で再開できます。署名・公証済みの `.app` が残っていることを検証したうえで、時間のかかるビルドと `.app` の公証をやり直さずに DMG から進めます。
+
+```bash
+bash scripts/release-macos-signed.sh --dmg-only
+```
+
+DMG の作成には `dmgbuild` が要り、これは Python 3.10 以上を要求します。`/usr/bin/python3` は 3.9 系のことがあるため、スクリプトは venv の Python 版数と `dmgbuild` / `Pillow` の import 可否まで確認し、条件を満たさなければ venv を作り直します。
+
+なお `CARGO_TARGET_DIR` が環境変数で別の場所へ向いていることがあります（エディタのサンドボックスなど）。`build-macos-dmg.py` は `src-tauri/target/release/bundle/macos/Libe Desk.app` を決め打ちで参照するため、スクリプトは `CARGO_TARGET_DIR` をリポジトリ内へ必ず上書きします。手作業で進める場合も同じ指定が要ります。
+
 専用設定 `src-tauri/tauri.signed.conf.json` で署名者と Hardened Runtime を指定します。通常のビルドと GitHub Actions は従来の設定を使います。秘密鍵はリポジトリに保存しません。
 
 生成先は `src-tauri/target/release/bundle/macos/Libe Desk.app` です。署名は次で確認します。
