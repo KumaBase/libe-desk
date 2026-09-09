@@ -2,6 +2,7 @@ import { onMount } from "solid-js";
 import Sidebar from "./components/Sidebar";
 import TabBar from "./components/TabBar";
 import { controller } from "./lib/controller";
+import { initFavoritesStore } from "./store/favorites";
 import { initTabsStore } from "./store/tabs";
 import "./App.css";
 
@@ -12,6 +13,7 @@ import "./App.css";
 function App() {
   onMount(() => {
     initTabsStore();
+    initFavoritesStore();
     void (async () => {
       await controller.applyChromeLayout();
       const tabs = await controller.listTabs();

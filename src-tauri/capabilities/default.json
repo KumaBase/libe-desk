@@ -7,6 +7,23 @@
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "core:window:allow-start-dragging",
-    "core:window:allow-internal-toggle-maximize"
+    "core:window:allow-internal-toggle-maximize",
+    "allow-list-services",
+    "allow-open-service",
+    "allow-list-tabs",
+    "allow-switch-tab",
+    "allow-move-tab",
+    "allow-close-tab",
+    "allow-go-back",
+    "allow-go-forward",
+    "allow-reload-tab",
+    "allow-get-current-page",
+    "allow-apply-chrome-layout",
+    "allow-list-favorite-users",
+    "allow-add-favorite-user",
+    "allow-remove-favorite-user",
+    "allow-rename-favorite-user",
+    "allow-move-favorite-user",
+    "allow-open-favorite-user"
   ]
 }

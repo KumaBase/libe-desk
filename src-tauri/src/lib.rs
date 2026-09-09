@@ -1,6 +1,8 @@
+mod favorites;
 mod tab_manager;
 mod window_state;
 
+use favorites::FavoriteStore;
 use tab_manager::TabManager;
 use tauri::{Manager, RunEvent, WindowEvent};
 
@@ -11,6 +13,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(TabManager::default())
         .setup(|app| {
+            // お気に入りユーザーの読み込みには AppHandle が要るので setup で manage する。
+            app.manage(FavoriteStore::new(favorites::load(app.handle())));
+
             window_state::create_main(app)?;
             // 初期メニュー（タブ一覧は空）。タブ開閉のたびに rebuild する。
             tab_manager::rebuild_app_menu(app.handle(), &[])?;
@@ -73,6 +78,12 @@ pub fn run() {
             tab_manager::reload_tab,
             tab_manager::get_current_page,
             tab_manager::apply_chrome_layout,
+            favorites::list_favorite_users,
+            favorites::add_favorite_user,
+            favorites::remove_favorite_user,
+            favorites::rename_favorite_user,
+            favorites::move_favorite_user,
+            favorites::open_favorite_user,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Tauri application")

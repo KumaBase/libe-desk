@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "libecity-page",
+  "description": "リベシティのページへ注入したスクリプトに、お気に入りユーザーの参照と追加・削除だけを許可する。タブ操作系のコマンドは渡さない。",
+  "local": false,
+  "webviews": ["tab-*"],
+  "remote": {
+    "urls": ["https://libecity.com/*"]
+  },
+  "permissions": [
+    "allow-list-favorite-users",
+    "allow-add-favorite-user",
+    "allow-remove-favorite-user"
+  ]
+}
