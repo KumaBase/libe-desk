@@ -31,8 +31,8 @@ export interface FavoriteUser {
  */
 export const controller = {
   listServices: () => invoke<ServiceInfo[]>("list_services"),
-  openService: (serviceId: string) =>
-    invoke<TabInfo | null>("open_service", { serviceId }),
+  openService: (serviceId: string, reuseExisting = false) =>
+    invoke<TabInfo | null>("open_service", { serviceId, reuseExisting }),
   listTabs: () => invoke<TabInfo[]>("list_tabs"),
   moveTab: (tabId: string, beforeTabId: string | null) =>
     invoke<void>("move_tab", { tabId, beforeTabId }),

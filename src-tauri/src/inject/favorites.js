@@ -27,6 +27,8 @@
   var pending = {};
   var profileButton = null;
   var scheduled = 0;
+  var dirtyRoots = new Set();
+  var fullRefresh = true;
 
   function invoke(cmd, args) {
     return internals.invoke(cmd, args || {});
@@ -46,7 +48,8 @@
 
   function idFromHref(href) {
     try {
-      return idFromPath(new URL(href, window.location.origin).pathname);
+      var url = new URL(href, window.location.origin);
+      return url.origin === window.location.origin ? idFromPath(url.pathname) : null;
     } catch (err) {
       return null;
     }
@@ -152,16 +155,22 @@
     return false;
   }
 
-  function decorateAnchors() {
-    var anchors = document.querySelectorAll('a[href^="/user_profile/"]');
+  function decorateAnchors(root) {
+    var selector = 'a[href^="/user_profile/"], a[data-libedesk-fav]';
+    var anchors = Array.from(root.querySelectorAll(selector));
+    if (root.matches && root.matches(selector)) anchors.unshift(root);
     for (var i = 0; i < anchors.length; i++) {
       var anchor = anchors[i];
-      if (anchor.hasAttribute("data-libedesk-fav")) continue;
+      var id = idFromHref(anchor.getAttribute("href"));
+      var existing = anchor.querySelector("." + BUTTON_CLASS);
+      if (existing && existing.dataset.libedeskId === id) continue;
+      // 仮想リストで同じリンク要素が別ユーザーに再利用される場合。
+      if (existing) existing.remove();
+      anchor.removeAttribute("data-libedesk-fav");
 
       // アイコンだけのリンクには付けない。名前のリンク側にまとめる。
       if (!(anchor.textContent || "").trim()) continue;
 
-      var id = idFromHref(anchor.getAttribute("href"));
       if (!id) {
         anchor.setAttribute("data-libedesk-fav", "");
         continue;
@@ -229,11 +238,39 @@
     document.head.appendChild(style);
   }
 
-  var observer = new MutationObserver(schedule);
+  function queueRoot(node) {
+    var element = node.nodeType === 1 ? node : node.parentElement;
+    if (!element || !element.isConnected) return;
+    if (element.closest("." + BUTTON_CLASS)) return;
+    // テキスト追加も、リンク自身を調べれば済む。
+    dirtyRoots.add(element.closest("a") || element);
+  }
+
+  var observer = new MutationObserver(function (records) {
+    if (document.hidden) {
+      fullRefresh = true;
+      dirtyRoots.clear();
+      return;
+    }
+    records.forEach(function (record) {
+      if (record.type === "attributes" || record.type === "characterData") {
+        queueRoot(record.target);
+      } else {
+        // 更新元が body でも、追加された部分だけを検索する。
+        record.addedNodes.forEach(queueRoot);
+        var anchor = record.target.nodeType === 1 && record.target.closest("a");
+        if (anchor) queueRoot(anchor);
+      }
+    });
+    schedule();
+  });
 
   function observe() {
     if (document.body) {
-      observer.observe(document.body, { childList: true, subtree: true });
+      observer.observe(document.body, {
+        childList: true, subtree: true, characterData: true,
+        attributes: true, attributeFilter: ["href"],
+      });
     }
   }
 
@@ -244,7 +281,22 @@
       ensureStyle();
       // プロフィール本体を先に処理し、同じユーザーのリンクへ重複して出さない。
       decorateProfile();
-      decorateAnchors();
+      if (fullRefresh) {
+        decorateAnchors(document);
+      } else {
+        // 親子両方がキューにある場合、子を重ねて走査しない。
+        dirtyRoots.forEach(function (root) {
+          if (!root.isConnected) return;
+          var parent = root.parentElement;
+          while (parent) {
+            if (dirtyRoots.has(parent)) return;
+            parent = parent.parentElement;
+          }
+          decorateAnchors(root);
+        });
+      }
+      fullRefresh = false;
+      dirtyRoots.clear();
     } catch (err) {
       console.warn("[Libe Desk] お気に入りボタンの描画に失敗しました", err);
     }
@@ -252,10 +304,10 @@
   }
 
   function schedule() {
-    if (scheduled) return;
+    if (scheduled || document.hidden) return;
     scheduled = window.setTimeout(function () {
       scheduled = 0;
-      refresh();
+      if (!document.hidden) refresh();
     }, 120);
   }
 
@@ -276,11 +328,18 @@
       if (typeof original !== "function") return;
       window.history[name] = function () {
         var result = original.apply(this, arguments);
+        fullRefresh = true;
         schedule();
         return result;
       };
     });
-    window.addEventListener("popstate", schedule);
+    window.addEventListener("popstate", function () {
+      fullRefresh = true;
+      schedule();
+    });
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) schedule();
+    });
   }
 
   function start() {

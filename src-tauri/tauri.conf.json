@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Libe Desk",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "identifier": "com.kumabase.libedesk",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -21,10 +21,18 @@
         "minWidth": 760,
         "minHeight": 520,
         "transparent": false,
-        "backgroundColor": [222, 225, 230, 255],
+        "backgroundColor": [
+          222,
+          225,
+          230,
+          255
+        ],
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "trafficLightPosition": { "x": 12, "y": 12 }
+        "trafficLightPosition": {
+          "x": 12,
+          "y": 12
+        }
       }
     ],
     "security": {

@@ -6,15 +6,11 @@
 //! 追加するだけで済むようにするための分離。
 
 use serde::{Deserialize, Serialize};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::Mutex;
 use tauri::{
     webview::WebviewBuilder, AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Runtime,
     Url, WebviewUrl,
 };
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 /// サービス一覧の単一ソース。(id, 表示名, URL, カテゴリ, default_pinned)
 ///
@@ -270,38 +266,54 @@ fn is_allowed_internal_url(url: &Url) -> bool {
     })
 }
 
-/// OS opener に渡してよい URL。未知のカスタム scheme と userinfo は拒否する。
-fn is_allowed_external_url(url: &Url) -> bool {
-    !has_userinfo(url) && matches!(url.scheme(), "https" | "http" | "mailto" | "tel")
+/// 外部ページもWebViewで表示できるが、アプリのIPC権限は付与しない。
+fn is_allowed_web_url(url: &Url) -> bool {
+    !has_userinfo(url) && matches!(url.scheme(), "https" | "http") && url.host_str().is_some()
 }
 
-fn request_external_open<R: Runtime>(app: &AppHandle<R>, url: &Url, prompt_open: Arc<AtomicBool>) {
-    if !is_allowed_external_url(url) || prompt_open.swap(true, Ordering::AcqRel) {
+#[derive(Debug, PartialEq)]
+enum NavigationAction {
+    CurrentTab,
+    NewTab,
+    SystemApp,
+    Block,
+}
+
+fn navigation_action(url: &Url, external_tab: bool) -> NavigationAction {
+    if is_allowed_web_url(url) {
+        // 外部タブ内の遷移・リダイレクトは同じタブで継続する。
+        if external_tab || is_allowed_internal_url(url) {
+            NavigationAction::CurrentTab
+        } else {
+            NavigationAction::NewTab
+        }
+    } else if !has_userinfo(url) && matches!(url.scheme(), "mailto" | "tel") {
+        NavigationAction::SystemApp
+    } else {
+        NavigationAction::Block
+    }
+}
+
+fn open_link_in_new_tab<R: Runtime>(app: &AppHandle<R>, url: &Url) {
+    if !is_allowed_web_url(url) {
+        open_system_link(url);
         return;
     }
-
+    let app = app.clone();
     let target = url.to_string();
-    let display = {
-        let mut value = url.clone();
-        let _ = value.set_username("");
-        let _ = value.set_password(None);
-        value.set_query(None);
-        value.set_fragment(None);
-        value.to_string()
-    };
+    // WebViewのコールバック内で同期的に別WebViewを作成しない。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<TabManager>();
+        if let Err(err) = open_url_internal_with_title(&app, &state, &target, None) {
+            eprintln!("open link tab failed: {err}");
+        }
+    });
+}
 
-    app.dialog()
-        .message(format!(
-            "外部ブラウザで次のリンクを開きますか？\n\n{display}"
-        ))
-        .title("外部リンクを開く")
-        .buttons(MessageDialogButtons::YesNo)
-        .show(move |approved| {
-            if approved {
-                let _ = tauri_plugin_opener::open_url(&target, None::<&str>);
-            }
-            prompt_open.store(false, Ordering::Release);
-        });
+fn open_system_link(url: &Url) {
+    if !has_userinfo(url) && matches!(url.scheme(), "mailto" | "tel") {
+        let _ = tauri_plugin_opener::open_url(url.as_str(), None::<&str>);
+    }
 }
 
 /// URL をログへ出す場合は資格情報・query・fragmentを必ず除去する。
@@ -338,9 +350,10 @@ struct TabMeta {
     id: String,
     title: String,
     url: String,
+    applied_bounds: Option<Bounds>,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Bounds {
     pub x: f64,
     pub y: f64,
@@ -354,6 +367,7 @@ pub struct TabManagerState {
     active_id: Option<String>,
     next_id: u64,
     content_bounds: Option<Bounds>,
+    menu_tabs: Vec<TabInfo>,
 }
 
 pub type TabManager = Mutex<TabManagerState>;
@@ -406,20 +420,59 @@ fn move_tab_inner(
     Ok(source_index != destination_index)
 }
 
-fn emit_tabs_changed<R: Runtime>(app: &AppHandle<R>, state: &TabManagerState) {
+fn emit_tabs_changed<R: Runtime>(app: &AppHandle<R>, state: &mut TabManagerState) {
     let tabs = snapshot(state);
     let _ = app.emit("tabs-changed", &tabs);
-    update_window_title(app, state);
-    if let Err(err) = rebuild_app_menu(app, &tabs) {
-        eprintln!("rebuild menu failed: {err}");
+    match update_app_menu(app, &state.menu_tabs, &tabs) {
+        Ok(()) => state.menu_tabs = tabs,
+        Err(err) => eprintln!("update menu failed: {err}"),
     }
 }
 
-fn update_window_title<R: Runtime>(app: &AppHandle<R>, _state: &TabManagerState) {
-    // ウィンドウ一覧やOSの表示用タイトル。
-    if let Some(window) = app.get_window("main") {
-        let _ = window.set_title("Libe Desk");
+fn menu_structure_changed(previous: &[TabInfo], tabs: &[TabInfo]) -> bool {
+    !previous
+        .iter()
+        .map(|tab| &tab.id)
+        .eq(tabs.iter().map(|tab| &tab.id))
+}
+
+fn update_app_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    previous: &[TabInfo],
+    tabs: &[TabInfo],
+) -> Result<(), String> {
+    if menu_structure_changed(previous, tabs) {
+        return rebuild_app_menu(app, tabs);
     }
+    // URLだけの変更など、表示に影響しない通知ではOSへの呼び出しも省く。
+    let changed: Vec<_> = previous
+        .iter()
+        .zip(tabs)
+        .filter(|(old, new)| {
+            old.active != new.active
+                || menu_tab_label(&old.title, &old.url) != menu_tab_label(&new.title, &new.url)
+        })
+        .collect();
+    if changed.is_empty() {
+        return Ok(());
+    }
+    let menu = app.menu().ok_or("app menu missing")?;
+    let item = menu.get("tabs-menu").ok_or("tabs menu missing")?;
+    let submenu = item.as_submenu().ok_or("invalid tabs menu")?;
+    for (old, tab) in changed {
+        let item = submenu
+            .get(&format!("tab-switch:{}", tab.id))
+            .ok_or("tab menu item missing")?;
+        let item = item.as_check_menuitem().ok_or("invalid tab menu item")?;
+        let label = menu_tab_label(&tab.title, &tab.url);
+        if menu_tab_label(&old.title, &old.url) != label {
+            item.set_text(label).map_err(|e| e.to_string())?;
+        }
+        if old.active != tab.active {
+            item.set_checked(tab.active).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 fn menu_tab_label(title: &str, url: &str) -> String {
@@ -455,7 +508,7 @@ pub fn rebuild_app_menu<R: Runtime>(app: &AppHandle<R>, tabs: &[TabInfo]) -> Res
         .build(app)
         .map_err(|e| e.to_string())?;
 
-    let mut tabs_menu = SubmenuBuilder::new(app, "タブ")
+    let mut tabs_menu = SubmenuBuilder::with_id(app, "tabs-menu", "タブ")
         .item(&new_tab)
         .item(&close_tab)
         .separator();
@@ -537,7 +590,7 @@ pub fn rebuild_app_menu<R: Runtime>(app: &AppHandle<R>, tabs: &[TabInfo]) -> Res
 pub fn handle_tab_menu<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
     let state = app.state::<TabManager>();
     if id == "tab-new" {
-        return open_service(app.clone(), state, "libecity".to_string()).map(|_| ());
+        return open_service(app.clone(), state, "libecity".to_string(), None).map(|_| ());
     }
     if id == "tab-close" {
         let tab_id = active_tab_id(&state)?;
@@ -608,16 +661,18 @@ fn place_webview<R: Runtime>(
     width: f64,
     height: f64,
     label: &str,
-) {
+) -> Result<(), String> {
     if let Err(e) = webview.set_position(LogicalPosition::new(x, y)) {
-        layout_log(&format!("{label} set_position err: {e}"));
+        return Err(format!("{label} set_position err: {e}"));
     }
     if let Err(e) = webview.set_size(LogicalSize::new(width.max(1.0), height.max(1.0))) {
-        layout_log(&format!("{label} set_size err: {e}"));
+        return Err(format!("{label} set_size err: {e}"));
     }
+    #[cfg(debug_assertions)]
     if let Ok(pos) = webview.position() {
         layout_log(&format!("{label} actual_pos={pos:?}"));
     }
+    Ok(())
 }
 
 /// メイン UI はウィンドウ全面（タイトルバータブ＋サイドバー）。
@@ -636,18 +691,20 @@ pub fn apply_chrome_layout_inner_with<R: Runtime>(
 ) -> Result<(), String> {
     let (w, h) = window_logical_size(app).ok_or("cannot measure window")?;
 
-    if let Some(tabs) = app.get_webview("ui-tabs") {
-        let _ = tabs.close();
-    }
-
-    if let Some(ui) = app.get_webview("main") {
-        place_webview(&ui, 0.0, 0.0, w, h, "main");
-    }
-
     let bounds = compute_content_bounds(w, h);
-    state.content_bounds = Some(bounds);
+    if state.content_bounds != Some(bounds) {
+        if let Some(ui) = app.get_webview("main") {
+            place_webview(&ui, 0.0, 0.0, w, h, "main")?;
+        }
+        state.content_bounds = Some(bounds);
+    }
 
-    for tab in &state.tabs {
+    // 非表示タブのサイズ変更は、表示直前まで遅延させる。
+    for tab in &mut state.tabs {
+        if state.active_id.as_deref() != Some(tab.id.as_str()) || tab.applied_bounds == Some(bounds)
+        {
+            continue;
+        }
         if let Some(webview) = app.get_webview(&tab.id) {
             place_webview(
                 &webview,
@@ -656,7 +713,8 @@ pub fn apply_chrome_layout_inner_with<R: Runtime>(
                 bounds.width,
                 bounds.height,
                 &tab.id,
-            );
+            )?;
+            tab.applied_bounds = Some(bounds);
         }
     }
 
@@ -690,7 +748,8 @@ fn spawn_tab_webview<R: Runtime>(
 
     let nav_app = app.clone();
     let nav_tab_id = tab_id.clone();
-    let nav_prompt_open = Arc::new(AtomicBool::new(false));
+    let external_tab = !is_allowed_internal_url(&url);
+    let popup_app = app.clone();
     let title_app = app.clone();
     let title_tab_id = tab_id.clone();
 
@@ -707,33 +766,40 @@ fn spawn_tab_webview<R: Runtime>(
     let builder = WebviewBuilder::new(tab_id.clone(), WebviewUrl::External(url))
         .initialization_script(FAVORITES_SCRIPT)
         .on_navigation(move |nav_url| {
-            if is_allowed_internal_url(nav_url) {
+            if navigation_action(nav_url, external_tab) == NavigationAction::CurrentTab {
                 let state = nav_app.state::<TabManager>();
                 let mut guard = state.lock().unwrap();
                 if let Some(t) = guard.tabs.iter_mut().find(|t| t.id == nav_tab_id) {
+                    if t.url == nav_url.as_str() {
+                        return true;
+                    }
                     t.url = nav_url.to_string();
                 }
-                emit_tabs_changed(&nav_app, &guard);
+                emit_tabs_changed(&nav_app, &mut guard);
                 true
             } else {
-                // 内部許可外の遷移はWebViewでは拒否し、許可schemeだけ
-                // ネイティブ確認ダイアログを経て外部ブラウザへ渡す。
-                #[cfg(debug_assertions)]
-                smoke_log(&format!(
-                    "blocked_navigation {}",
-                    redact_url_for_log(nav_url)
-                ));
-                request_external_open(&nav_app, nav_url, nav_prompt_open.clone());
+                match navigation_action(nav_url, external_tab) {
+                    NavigationAction::NewTab => open_link_in_new_tab(&nav_app, nav_url),
+                    NavigationAction::SystemApp => open_system_link(nav_url),
+                    _ => {}
+                }
                 false
             }
+        })
+        .on_new_window(move |url, _features| {
+            open_link_in_new_tab(&popup_app, &url);
+            tauri::webview::NewWindowResponse::Deny
         })
         .on_document_title_changed(move |_webview, title| {
             let state = title_app.state::<TabManager>();
             let mut guard = state.lock().unwrap();
             if let Some(t) = guard.tabs.iter_mut().find(|t| t.id == title_tab_id) {
+                if t.title == title {
+                    return;
+                }
                 t.title = title;
             }
-            emit_tabs_changed(&title_app, &guard);
+            emit_tabs_changed(&title_app, &mut guard);
         });
 
     window
@@ -769,8 +835,8 @@ pub(crate) fn open_url_internal_with_title<R: Runtime>(
 ) -> Result<TabInfo, String> {
     let parsed = Url::parse(raw_url).map_err(|e| e.to_string())?;
 
-    if !is_allowed_internal_url(&parsed) {
-        return Err("URL is not an allowed internal service".to_string());
+    if !is_allowed_web_url(&parsed) {
+        return Err("URL is not an allowed web page".to_string());
     }
 
     // レイアウト確定（サイドバー / タブ帯 / コンテンツ枠）
@@ -803,12 +869,13 @@ pub(crate) fn open_url_internal_with_title<R: Runtime>(
         id: tab_id.clone(),
         title,
         url: parsed.as_str().to_string(),
+        applied_bounds: Some(bounds),
     });
     guard.active_id = Some(tab_id.clone());
     apply_visibility(app, &guard);
-    // 新規コンテンツ Webview の上にタブ帯を載せ直す
+    // 生成中にウィンドウサイズが変わった場合も最新のサイズに合わせる
     apply_chrome_layout_inner_with(app, &mut guard, true)?;
-    emit_tabs_changed(app, &guard);
+    emit_tabs_changed(app, &mut guard);
 
     snapshot(&guard)
         .into_iter()
@@ -853,19 +920,49 @@ pub fn open_service<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, TabManager>,
     service_id: String,
+    reuse_existing: Option<bool>,
 ) -> Result<Option<TabInfo>, String> {
-    if let Some((_, _, raw_url, _, _)) = EXTERNAL_SERVICES.iter().find(|(id, ..)| *id == service_id)
+    if let Some((_, name, raw_url, _, _)) =
+        EXTERNAL_SERVICES.iter().find(|(id, ..)| *id == service_id)
     {
-        let url = Url::parse(raw_url).map_err(|e| e.to_string())?;
-        request_external_open(&app, &url, Arc::new(AtomicBool::new(false)));
-        return Ok(None);
+        return open_url_internal_with_title(&app, &state, raw_url, Some(name)).map(Some);
     }
     let (name, url) = SERVICES
         .iter()
         .find(|(id, _, _, _, _)| *id == service_id)
         .map(|(_, name, url, _, _)| (*name, *url))
         .ok_or("unknown service")?;
+    if reuse_existing.unwrap_or(false) {
+        if let Some(tab) = reuse_url(&app, &state, url)? {
+            return Ok(Some(tab));
+        }
+    }
     open_url_internal_with_title(&app, &state, url, Some(name)).map(Some)
+}
+
+/// サイドバーの同一URLだけ再利用する。新規タブ操作には適用しない。
+pub(crate) fn reuse_url<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &tauri::State<'_, TabManager>,
+    url: &str,
+) -> Result<Option<TabInfo>, String> {
+    let ids: Vec<_> = {
+        let guard = state.lock().unwrap();
+        guard.tabs.iter().map(|tab| tab.id.clone()).collect()
+    };
+    // SPAの履歴変更はナビゲーション通知が来ない場合があるため、
+    // 保存済みURLではなくWebViewの現在地を照合する。
+    let id = ids.into_iter().find(|id| {
+        app.get_webview(id)
+            .and_then(|view| view.url().ok())
+            .is_some_and(|current| current.as_str() == url)
+    });
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    switch_tab(app.clone(), state.clone(), id.clone())?;
+    let guard = state.lock().unwrap();
+    Ok(snapshot(&guard).into_iter().find(|tab| tab.id == id))
 }
 
 #[tauri::command]
@@ -884,11 +981,18 @@ pub fn switch_tab<R: Runtime>(
     if !guard.tabs.iter().any(|t| t.id == tab_id) {
         return Err("tab not found".into());
     }
+    if guard.active_id.as_deref() == Some(tab_id.as_str()) {
+        if let Some(webview) = app.get_webview(&tab_id) {
+            let _ = webview.set_focus();
+        }
+        return Ok(());
+    }
     guard.active_id = Some(tab_id.clone());
+    apply_chrome_layout_inner(&app, &mut guard)?;
     #[cfg(debug_assertions)]
     smoke_log(&format!("switch_tab {tab_id}"));
     apply_visibility(&app, &guard);
-    emit_tabs_changed(&app, &guard);
+    emit_tabs_changed(&app, &mut guard);
     Ok(())
 }
 
@@ -901,7 +1005,7 @@ pub fn move_tab<R: Runtime>(
 ) -> Result<(), String> {
     let mut guard = state.lock().unwrap();
     if move_tab_inner(&mut guard, &tab_id, before_tab_id.as_deref())? {
-        emit_tabs_changed(&app, &guard);
+        emit_tabs_changed(&app, &mut guard);
     }
     Ok(())
 }
@@ -930,8 +1034,9 @@ pub fn close_tab<R: Runtime>(
             guard.active_id = guard.tabs.get(fallback_index).map(|t| t.id.clone());
         }
 
+        apply_chrome_layout_inner(&app, &mut guard)?;
         apply_visibility(&app, &guard);
-        emit_tabs_changed(&app, &guard);
+        emit_tabs_changed(&app, &mut guard);
         guard.tabs.is_empty()
     };
 
@@ -1025,6 +1130,7 @@ mod tests {
                     id: (*id).to_string(),
                     title: format!("title-{id}"),
                     url: format!("https://example.com/{id}"),
+                    applied_bounds: None,
                 })
                 .collect(),
             active_id: Some(active_id.to_string()),
@@ -1034,6 +1140,21 @@ mod tests {
 
     fn tab_ids(state: &TabManagerState) -> Vec<&str> {
         state.tabs.iter().map(|tab| tab.id.as_str()).collect()
+    }
+
+    #[test]
+    fn menu_rebuild_only_for_tab_structure_changes() {
+        let original = snapshot(&tab_state(&["a", "b"], "a"));
+        let mut changed = original.clone();
+        changed[0].title = "new title".into();
+        changed[0].url = "https://libecity.com/room_list".into();
+        changed[0].active = false;
+        changed[1].active = true;
+        assert!(!menu_structure_changed(&original, &changed));
+        changed.swap(0, 1);
+        assert!(menu_structure_changed(&original, &changed));
+        assert!(menu_structure_changed(&original, &original[..1]));
+        assert!(menu_structure_changed(&[], &original));
     }
 
     #[test]
@@ -1122,24 +1243,58 @@ mod tests {
     }
 
     #[test]
-    fn external_urls_allow_only_safe_schemes_without_userinfo() {
-        for url in [
-            "https://example.com/",
-            "http://example.com/",
-            "mailto:test@example.com",
-            "tel:+81000000000",
-        ] {
-            assert!(is_allowed_external_url(&Url::parse(url).unwrap()), "{url}");
+    fn web_urls_allow_only_http_and_https_without_userinfo() {
+        for url in ["https://example.com/", "http://example.com/"] {
+            assert!(is_allowed_web_url(&Url::parse(url).unwrap()), "{url}");
         }
 
         for url in [
+            "mailto:test@example.com",
+            "tel:+81000000000",
             "file:///tmp/example",
             "data:text/plain,example",
             "javascript:alert(1)",
             "custom-app://open/something",
             "https://user:secret@example.com/",
         ] {
-            assert!(!is_allowed_external_url(&Url::parse(url).unwrap()), "{url}");
+            assert!(!is_allowed_web_url(&Url::parse(url).unwrap()), "{url}");
+        }
+    }
+
+    #[test]
+    fn external_links_open_new_tabs_without_redirect_loops() {
+        let external = Url::parse("https://example.com/page").unwrap();
+        let internal = Url::parse("https://libecity.com/room_list").unwrap();
+        assert_eq!(
+            navigation_action(&external, false),
+            NavigationAction::NewTab
+        );
+        assert_eq!(
+            navigation_action(&external, true),
+            NavigationAction::CurrentTab
+        );
+        assert_eq!(
+            navigation_action(&internal, false),
+            NavigationAction::CurrentTab
+        );
+        assert_eq!(
+            navigation_action(&internal, true),
+            NavigationAction::CurrentTab
+        );
+        assert_eq!(
+            navigation_action(&Url::parse("mailto:test@example.com").unwrap(), false),
+            NavigationAction::SystemApp
+        );
+        for target in [
+            "javascript:alert(1)",
+            "file:///tmp/test",
+            "data:text/html,test",
+            "https://user:pass@example.com/",
+        ] {
+            assert_eq!(
+                navigation_action(&Url::parse(target).unwrap(), true),
+                NavigationAction::Block
+            );
         }
     }
 
@@ -1156,7 +1311,7 @@ mod tests {
     fn external_services_do_not_expand_internal_webview_permissions() {
         for (_, _, raw_url, _, _) in EXTERNAL_SERVICES {
             let url = Url::parse(raw_url).unwrap();
-            assert!(is_allowed_external_url(&url));
+            assert!(is_allowed_web_url(&url));
             assert!(!is_allowed_internal_url(&url));
         }
         assert!(is_allowed_internal_url(

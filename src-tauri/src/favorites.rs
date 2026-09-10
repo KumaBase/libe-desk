@@ -267,7 +267,11 @@ pub fn open_favorite_user<R: Runtime>(
         .map(|f| f.name.clone())
         .ok_or("favorite user not found")?;
 
-    crate::tab_manager::open_url_internal_with_title(&app, &tabs, &profile_url(&id), Some(&name))
+    let url = profile_url(&id);
+    if let Some(tab) = crate::tab_manager::reuse_url(&app, &tabs, &url)? {
+        return Ok(tab);
+    }
+    crate::tab_manager::open_url_internal_with_title(&app, &tabs, &url, Some(&name))
 }
 
 #[cfg(test)]

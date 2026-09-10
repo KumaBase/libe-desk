@@ -38,6 +38,9 @@ jobs:
       - name: Type-check
         run: npx --no-install tsc --noEmit
 
+      - name: Test injected scripts
+        run: npm test
+
       - name: Build frontend
         run: npm run build
 
