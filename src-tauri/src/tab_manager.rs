@@ -8,8 +8,8 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::{
-    webview::WebviewBuilder, AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Runtime,
-    Url, WebviewUrl,
+    webview::{PageLoadEvent, WebviewBuilder},
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Runtime, Url, WebviewUrl,
 };
 
 /// サービス一覧の単一ソース。(id, 表示名, URL, カテゴリ, default_pinned)
@@ -351,6 +351,11 @@ struct TabMeta {
     title: String,
     url: String,
     applied_bounds: Option<Bounds>,
+    /// ページの読み込みが開始済みか（Windowsの停滞検出用）。
+    /// 読み取りはWindows限定のため、他OSでは未読み込みフィールドとして
+    /// dead_code 警告を出さない。
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    load_started: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -586,18 +591,42 @@ pub fn rebuild_app_menu<R: Runtime>(app: &AppHandle<R>, tabs: &[TabInfo]) -> Res
     Ok(())
 }
 
-/// メニューからのタブ操作。
+/// メニューからのタブ操作。イベントハンドラはメインスレッドで動くため、
+/// WebViewを生成し得る操作は spawn_blocking に回す（open_link_in_new_tab と同じ理由）。
 pub fn handle_tab_menu<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
-    let state = app.state::<TabManager>();
     if id == "tab-new" {
-        return open_service(app.clone(), state, "libecity".to_string(), None).map(|_| ());
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let state = app.state::<TabManager>();
+            if let Err(err) = open_service_impl(app.clone(), state, "libecity".to_string(), None) {
+                eprintln!("tab-new failed: {err}");
+            }
+        });
+        return Ok(());
     }
     if id == "tab-close" {
-        let tab_id = active_tab_id(&state)?;
-        return close_tab(app.clone(), state, tab_id);
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let state = app.state::<TabManager>();
+            // ロック取得はメインスレッド外で行う（デッドロック防止）。
+            let Ok(tab_id) = active_tab_id(&state) else {
+                return;
+            };
+            if let Err(err) = close_tab_impl(app.clone(), state, tab_id) {
+                eprintln!("tab-close failed: {err}");
+            }
+        });
+        return Ok(());
     }
     if let Some(tab_id) = id.strip_prefix("tab-switch:") {
-        return switch_tab(app.clone(), state, tab_id.to_string());
+        let tab_id = tab_id.to_string();
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let state = app.state::<TabManager>();
+            if let Err(err) = switch_tab_impl(app.clone(), state, tab_id) {
+                eprintln!("tab-switch failed: {err}");
+            }
+        });
     }
     Ok(())
 }
@@ -738,6 +767,28 @@ fn smoke_log(message: &str) {
     }
 }
 
+/// WebView2のイベントコールバック（メインスレッド）からタブ状態を更新する。
+/// ロック取得と tabs-changed の通知を別スレッドで行い、メインスレッドを
+/// ロック待ちで止めない（デッドロック防止）。クロージャは変更があったか
+/// を返し、変わっていなければ通知しない。タブが見つからない場合は何もしない。
+fn update_tab_state<R, F>(app: AppHandle<R>, tab_id: String, update: F)
+where
+    R: Runtime,
+    F: FnOnce(&mut TabMeta) -> bool + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<TabManager>();
+        let mut guard = state.lock().unwrap();
+        let Some(t) = guard.tabs.iter_mut().find(|t| t.id == tab_id) else {
+            return;
+        };
+        if !update(t) {
+            return;
+        }
+        emit_tabs_changed(&app, &mut guard);
+    });
+}
+
 fn spawn_tab_webview<R: Runtime>(
     app: &AppHandle<R>,
     tab_id: String,
@@ -765,25 +816,49 @@ fn spawn_tab_webview<R: Runtime>(
 
     let builder = WebviewBuilder::new(tab_id.clone(), WebviewUrl::External(url))
         .initialization_script(FAVORITES_SCRIPT)
-        .on_navigation(move |nav_url| {
-            if navigation_action(nav_url, external_tab) == NavigationAction::CurrentTab {
-                let state = nav_app.state::<TabManager>();
-                let mut guard = state.lock().unwrap();
-                if let Some(t) = guard.tabs.iter_mut().find(|t| t.id == nav_tab_id) {
-                    if t.url == nav_url.as_str() {
-                        return true;
+        .on_page_load(|webview, event| {
+            // WindowsのWebView2で読み込みが停滞した場合、この Started が
+            // 一切来ない。停滞検出の判定に使うため記録する。
+            if matches!(event.event(), PageLoadEvent::Started) {
+                let app = webview.app_handle().clone();
+                let tab_id = webview.label().to_string();
+                update_tab_state(app, tab_id, |t| {
+                    if t.load_started {
+                        return false;
                     }
-                    t.url = nav_url.to_string();
+                    t.load_started = true;
+                    true
+                });
+            }
+        })
+        .on_navigation(move |nav_url| {
+            // このコールバックはメインスレッドで実行される。ここで
+            // TabManager のロックを同期的に取ると、ロックを保持したまま
+            // メインスレッドを待つワーカーとデッドロックするため、
+            // 判定だけ同期的に行い、記録は別スレッドで行う。
+            match navigation_action(nav_url, external_tab) {
+                NavigationAction::CurrentTab => {
+                    let app = nav_app.clone();
+                    let tab_id = nav_tab_id.clone();
+                    let url = nav_url.to_string();
+                    update_tab_state(app, tab_id, move |t| {
+                        if t.url == url {
+                            return false;
+                        }
+                        t.url = url;
+                        true
+                    });
+                    true
                 }
-                emit_tabs_changed(&nav_app, &mut guard);
-                true
-            } else {
-                match navigation_action(nav_url, external_tab) {
-                    NavigationAction::NewTab => open_link_in_new_tab(&nav_app, nav_url),
-                    NavigationAction::SystemApp => open_system_link(nav_url),
-                    _ => {}
+                NavigationAction::NewTab => {
+                    open_link_in_new_tab(&nav_app, nav_url);
+                    false
                 }
-                false
+                NavigationAction::SystemApp => {
+                    open_system_link(nav_url);
+                    false
+                }
+                NavigationAction::Block => false,
             }
         })
         .on_new_window(move |url, _features| {
@@ -791,15 +866,15 @@ fn spawn_tab_webview<R: Runtime>(
             tauri::webview::NewWindowResponse::Deny
         })
         .on_document_title_changed(move |_webview, title| {
-            let state = title_app.state::<TabManager>();
-            let mut guard = state.lock().unwrap();
-            if let Some(t) = guard.tabs.iter_mut().find(|t| t.id == title_tab_id) {
+            let app = title_app.clone();
+            let tab_id = title_tab_id.clone();
+            update_tab_state(app, tab_id, move |t| {
                 if t.title == title {
-                    return;
+                    return false;
                 }
                 t.title = title;
-            }
-            emit_tabs_changed(&title_app, &mut guard);
+                true
+            });
         });
 
     window
@@ -815,6 +890,37 @@ fn spawn_tab_webview<R: Runtime>(
 
     #[cfg(debug_assertions)]
     smoke_log(&format!("spawn_ok id={tab_id}"));
+
+    // WindowsのWebView2では、生成直後の初期ナビゲーションが
+    // NavigationStarting で止まったまま完了しないことがある
+    // （https://github.com/tauri-apps/tauri/issues/10011）。
+    // 読み込み開始（on_page_load Started）が確認できない場合に限り、
+    // 遅延して reload を試す。未コミットの初期読み込みへの即時 reload は
+    // 意図しないURLへ遷移することがあるため、即実行はしない。
+    #[cfg(target_os = "windows")]
+    {
+        let app = app.clone();
+        let nudge_tab_id = tab_id.clone();
+        std::thread::spawn(move || {
+            for delay_ms in [1000u64, 4000] {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                let stalled = {
+                    let state = app.state::<TabManager>();
+                    let guard = state.lock().unwrap();
+                    !guard
+                        .tabs
+                        .iter()
+                        .any(|t| t.id == nudge_tab_id && t.load_started)
+                };
+                if !stalled {
+                    return;
+                }
+                if let Some(webview) = app.get_webview(&nudge_tab_id) {
+                    let _ = webview.reload();
+                }
+            }
+        });
+    }
 
     Ok(())
 }
@@ -870,6 +976,7 @@ pub(crate) fn open_url_internal_with_title<R: Runtime>(
         title,
         url: parsed.as_str().to_string(),
         applied_bounds: Some(bounds),
+        load_started: false,
     });
     guard.active_id = Some(tab_id.clone());
     apply_visibility(app, &guard);
@@ -915,8 +1022,10 @@ pub fn list_services() -> Vec<ServiceInfo> {
     services
 }
 
-#[tauri::command]
-pub fn open_service<R: Runtime>(
+/// open_service の実体。WebViewの生成を伴うため、Windowsでは
+/// メインスレッド（同期コマンド・イベントハンドラ）から呼べない。
+/// 呼び出し側は async コマンドか spawn_blocking 上で実行すること。
+pub fn open_service_impl<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, TabManager>,
     service_id: String,
@@ -940,6 +1049,19 @@ pub fn open_service<R: Runtime>(
     open_url_internal_with_title(&app, &state, url, Some(name)).map(Some)
 }
 
+/// WebView2の制約で、同期コマンド内のWebView生成はデッドロック・白表示化する。
+/// そのため WebView を作り得るコマンドは async にして実行スレッドをずらす。
+/// https://docs.rs/tauri/latest/tauri/webview/struct.WebviewBuilder.html#known-issues
+#[tauri::command]
+pub async fn open_service<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, TabManager>,
+    service_id: String,
+    reuse_existing: Option<bool>,
+) -> Result<Option<TabInfo>, String> {
+    open_service_impl(app, state, service_id, reuse_existing)
+}
+
 /// サイドバーの同一URLだけ再利用する。新規タブ操作には適用しない。
 pub(crate) fn reuse_url<R: Runtime>(
     app: &AppHandle<R>,
@@ -960,19 +1082,22 @@ pub(crate) fn reuse_url<R: Runtime>(
     let Some(id) = id else {
         return Ok(None);
     };
-    switch_tab(app.clone(), state.clone(), id.clone())?;
+    switch_tab_impl(app.clone(), state.clone(), id.clone())?;
     let guard = state.lock().unwrap();
     Ok(snapshot(&guard).into_iter().find(|tab| tab.id == id))
 }
 
+/// 状態の読み取りのみだが、同期コマンドはメインスレッドで実行され、
+/// ロック待ちでメインスレッドを止めうるため async にする。
 #[tauri::command]
-pub fn list_tabs(state: tauri::State<'_, TabManager>) -> Vec<TabInfo> {
+pub async fn list_tabs(state: tauri::State<'_, TabManager>) -> Result<Vec<TabInfo>, String> {
     let guard = state.lock().unwrap();
-    snapshot(&guard)
+    Ok(snapshot(&guard))
 }
 
-#[tauri::command]
-pub fn switch_tab<R: Runtime>(
+/// switch_tab の実体。WebViewの表示切替を伴うため、メインスレッド
+/// 以外（async コマンド・spawn_blocking）から呼ぶこと。
+pub fn switch_tab_impl<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, TabManager>,
     tab_id: String,
@@ -997,7 +1122,16 @@ pub fn switch_tab<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn move_tab<R: Runtime>(
+pub async fn switch_tab<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, TabManager>,
+    tab_id: String,
+) -> Result<(), String> {
+    switch_tab_impl(app, state, tab_id)
+}
+
+/// move_tab の実体。メニュー再構築を伴うため switch_tab_impl と同じ扱い。
+pub fn move_tab_impl<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, TabManager>,
     tab_id: String,
@@ -1011,7 +1145,18 @@ pub fn move_tab<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn close_tab<R: Runtime>(
+pub async fn move_tab<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, TabManager>,
+    tab_id: String,
+    before_tab_id: Option<String>,
+) -> Result<(), String> {
+    move_tab_impl(app, state, tab_id, before_tab_id)
+}
+
+/// close_tab の実体。最後のタブを閉じた際にWebViewを作り直すため、
+/// open_service_impl と同様にメインスレッド以外から呼ぶこと。
+pub fn close_tab_impl<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, TabManager>,
     tab_id: String,
@@ -1049,31 +1194,59 @@ pub fn close_tab<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn go_back<R: Runtime>(app: AppHandle<R>, tab_id: String) -> Result<(), String> {
-    #[cfg(debug_assertions)]
-    smoke_log(&format!("go_back {tab_id}"));
-    let webview = app.get_webview(&tab_id).ok_or("tab not found")?;
-    webview
-        .eval("window.history.back()")
-        .map_err(|e| e.to_string())
+pub async fn close_tab<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, TabManager>,
+    tab_id: String,
+) -> Result<(), String> {
+    close_tab_impl(app, state, tab_id)
+}
+
+/// go_back / go_forward / reload_tab の実体。WebViewへの操作を
+/// ディスパッチするため、メインスレッド以外から呼ぶこと。
+pub fn navigate_impl<R: Runtime>(
+    app: &AppHandle<R>,
+    action: &str,
+    tab_id: &str,
+) -> Result<(), String> {
+    let webview = app.get_webview(tab_id).ok_or("tab not found")?;
+    match action {
+        "back" => {
+            #[cfg(debug_assertions)]
+            smoke_log(&format!("go_back {tab_id}"));
+            webview
+                .eval("window.history.back()")
+                .map_err(|e| e.to_string())
+        }
+        "forward" => {
+            #[cfg(debug_assertions)]
+            smoke_log(&format!("go_forward {tab_id}"));
+            webview
+                .eval("window.history.forward()")
+                .map_err(|e| e.to_string())
+        }
+        "reload" => {
+            #[cfg(debug_assertions)]
+            smoke_log(&format!("reload_tab {tab_id}"));
+            webview.reload().map_err(|e| e.to_string())
+        }
+        _ => Err("unknown navigation action".into()),
+    }
 }
 
 #[tauri::command]
-pub fn go_forward<R: Runtime>(app: AppHandle<R>, tab_id: String) -> Result<(), String> {
-    #[cfg(debug_assertions)]
-    smoke_log(&format!("go_forward {tab_id}"));
-    let webview = app.get_webview(&tab_id).ok_or("tab not found")?;
-    webview
-        .eval("window.history.forward()")
-        .map_err(|e| e.to_string())
+pub async fn go_back<R: Runtime>(app: AppHandle<R>, tab_id: String) -> Result<(), String> {
+    navigate_impl(&app, "back", &tab_id)
 }
 
 #[tauri::command]
-pub fn reload_tab<R: Runtime>(app: AppHandle<R>, tab_id: String) -> Result<(), String> {
-    #[cfg(debug_assertions)]
-    smoke_log(&format!("reload_tab {tab_id}"));
-    let webview = app.get_webview(&tab_id).ok_or("tab not found")?;
-    webview.reload().map_err(|e| e.to_string())
+pub async fn go_forward<R: Runtime>(app: AppHandle<R>, tab_id: String) -> Result<(), String> {
+    navigate_impl(&app, "forward", &tab_id)
+}
+
+#[tauri::command]
+pub async fn reload_tab<R: Runtime>(app: AppHandle<R>, tab_id: String) -> Result<(), String> {
+    navigate_impl(&app, "reload", &tab_id)
 }
 
 fn active_tab_id(state: &tauri::State<'_, TabManager>) -> Result<String, String> {
@@ -1086,19 +1259,16 @@ fn active_tab_id(state: &tauri::State<'_, TabManager>) -> Result<String, String>
 }
 
 /// メニューバー等から、現在のアクティブタブに対して操作する。
+/// メニューのイベントハンドラはメインスレッドで動くため、
+/// spawn_blocking 経由で呼ぶこと。
 pub fn navigate_active<R: Runtime>(app: &AppHandle<R>, action: &str) -> Result<(), String> {
     let state = app.state::<TabManager>();
     let tab_id = active_tab_id(&state)?;
-    match action {
-        "back" => go_back(app.clone(), tab_id),
-        "forward" => go_forward(app.clone(), tab_id),
-        "reload" => reload_tab(app.clone(), tab_id),
-        _ => Err("unknown navigation action".into()),
-    }
+    navigate_impl(app, action, &tab_id)
 }
 
 #[tauri::command]
-pub fn get_current_page(
+pub async fn get_current_page(
     state: tauri::State<'_, TabManager>,
     tab_id: String,
 ) -> Result<TabInfo, String> {
@@ -1110,7 +1280,7 @@ pub fn get_current_page(
 }
 
 #[tauri::command]
-pub fn apply_chrome_layout<R: Runtime>(
+pub async fn apply_chrome_layout<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, TabManager>,
 ) -> Result<(), String> {
@@ -1131,6 +1301,7 @@ mod tests {
                     title: format!("title-{id}"),
                     url: format!("https://example.com/{id}"),
                     applied_bounds: None,
+                    load_started: true,
                 })
                 .collect(),
             active_id: Some(active_id.to_string()),
