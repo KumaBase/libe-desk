@@ -34,22 +34,34 @@ pub fn run() {
                     "nav-reload" => "reload",
                     _ => return,
                 };
-                if let Err(err) = tab_manager::navigate_active(app, action) {
-                    eprintln!("menu navigation failed: {err}");
-                }
+                // メニューのイベントハンドラはメインスレッドで動くため、
+                // WebView操作は別スレッドへ回す（WindowsのWebView2制約）。
+                let app = app.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    if let Err(err) = tab_manager::navigate_active(&app, action) {
+                        eprintln!("menu navigation failed: {err}");
+                    }
+                });
             });
 
             let handle = app.handle().clone();
             if let Some(window) = app.get_window("main") {
                 window.on_window_event(move |event| {
                     if let WindowEvent::Resized(_) = event {
-                        let state = handle.state::<TabManager>();
-                        let mut guard = state.lock().unwrap();
-                        if let Err(err) =
-                            tab_manager::apply_chrome_layout_inner(&handle, &mut guard)
-                        {
-                            eprintln!("layout on resize failed: {err}");
-                        }
+                        // ウィンドウイベントのハンドラはメインスレッドで動く。
+                        // WebViewの配置変更をここで同期的に呼ぶとメイン
+                        // スレッドが待ち合わせて固まるため、別スレッドへ
+                        // 回す（WindowsのWebView2制約）。
+                        let handle = handle.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            let state = handle.state::<TabManager>();
+                            let mut guard = state.lock().unwrap();
+                            if let Err(err) =
+                                tab_manager::apply_chrome_layout_inner(&handle, &mut guard)
+                            {
+                                eprintln!("layout on resize failed: {err}");
+                            }
+                        });
                     }
                 });
             }

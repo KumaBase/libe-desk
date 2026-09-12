@@ -160,13 +160,20 @@ fn commit<R: Runtime>(
     Ok(list)
 }
 
+/// 状態の読み取りのみだが、同期コマンドはメインスレッドで実行され、
+/// ロック待ちでメインスレッドを止めうるため async にする。
 #[tauri::command]
-pub fn list_favorite_users(state: tauri::State<'_, FavoriteStore>) -> Vec<FavoriteUser> {
-    state.lock().unwrap().clone()
+pub async fn list_favorite_users(
+    state: tauri::State<'_, FavoriteStore>,
+) -> Result<Vec<FavoriteUser>, String> {
+    Ok(state.lock().unwrap().clone())
 }
 
+/// 追加・削除・名前変更・並べ替えはタブWebViewへの配信（eval）を
+/// 伴うため、async コマンドでメインスレッド以外から実行する
+/// （tab_manager の同期コマンド制約と同じ理由）。
 #[tauri::command]
-pub fn add_favorite_user<R: Runtime>(
+pub async fn add_favorite_user<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, FavoriteStore>,
     id: String,
@@ -196,7 +203,7 @@ pub fn add_favorite_user<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn remove_favorite_user<R: Runtime>(
+pub async fn remove_favorite_user<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, FavoriteStore>,
     id: String,
@@ -207,7 +214,7 @@ pub fn remove_favorite_user<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn rename_favorite_user<R: Runtime>(
+pub async fn rename_favorite_user<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, FavoriteStore>,
     id: String,
@@ -226,7 +233,7 @@ pub fn rename_favorite_user<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn move_favorite_user<R: Runtime>(
+pub async fn move_favorite_user<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, FavoriteStore>,
     id: String,
@@ -251,8 +258,10 @@ pub fn move_favorite_user<R: Runtime>(
     commit(&app, &state)
 }
 
+/// WebViewを生成し得るため、同期コマンドではなく async で呼ぶ
+/// （tab_manager::open_service_impl の注釈と同じ制約）。
 #[tauri::command]
-pub fn open_favorite_user<R: Runtime>(
+pub async fn open_favorite_user<R: Runtime>(
     app: AppHandle<R>,
     favorites: tauri::State<'_, FavoriteStore>,
     tabs: tauri::State<'_, crate::tab_manager::TabManager>,

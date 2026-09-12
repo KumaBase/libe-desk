@@ -201,4 +201,6 @@ git tag v0.1.1
 git push origin v0.1.1
 ```
 
-GitHub Actions ではまだコード署名を行いません。ローカルの署名設定だけでは CI に証明書は渡りません。現在の署名・対応環境と、過去の未署名版向けの起動手順は [README.md](../README.md) を参照してください。
+GitHub Actions ではまだコード署名を行いません。ローカルの署名設定だけでは CI に証明書は渡りません。0.2.2以降のWindows版（`.msi` / `.exe`）はこのワークフローの未署名ビルドで配布します。SignPath FoundationによるWindows向けコード署名への切り替えを準備中です。現在の署名・対応環境と、未署名版向けの起動手順は [README.md](../README.md) を参照してください。
+
+Windowsのリリース前には、Windowsマシンで `npm run tauri build` を実行し、生成されたインストーラーからの起動と主要操作（タブ・サイドバー・お気に入り・ウィンドウ位置の復元）を確認してください。
